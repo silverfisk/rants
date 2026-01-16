@@ -148,15 +148,24 @@ class Orchestrator:
         from gateway.models.openai_client import OpenAIClient
 
         tool_compiler = self.config.models.tool_compiler
+
+        tool_compiler_instructions = (
+            "You are a tool compiler. Output STRICT JSON only (no markdown, no code fences, no commentary). "
+            "Return exactly one JSON object with this shape: "
+            '{"tool_calls": [{"tool": "<tool name>", "parameters": { ... }}]}. '
+            "Only use tool names present in tool_schemas. If no tool is needed, return {\"tool_calls\": []}."
+        )
+
+        compile_input = {
+            "system": tool_compiler_instructions,
+            "tool_schemas": tool_schemas,
+            "transcript": transcript.model_dump(),
+            "tool_intent": tool_intent,
+        }
+
         payload = {
             "model": tool_compiler.model,
-            "input": json.dumps(
-                {
-                    "tool_schemas": tool_schemas,
-                    "transcript": transcript.model_dump(),
-                    "tool_intent": tool_intent,
-                }
-            ),
+            "input": json.dumps(compile_input),
         }
         if tool_compiler.parameters:
             payload.update(tool_compiler.parameters)
@@ -170,6 +179,7 @@ class Orchestrator:
             max_retries=self.config.resilience.max_retries,
             backoff_seconds=self.config.resilience.backoff_seconds,
         )
+
         response = await client.post_json("/responses", payload)
         text = _extract_output_text(response.data).strip()
 
@@ -180,7 +190,29 @@ class Orchestrator:
         if parsed is not None:
             return parsed
 
-        raise ValueError("Tool compiler returned unparseable tool_calls payload")
+        repair_input = {
+            **compile_input,
+            "system": tool_compiler_instructions
+            + " Previous output was invalid. Return ONLY valid JSON with the exact schema.",
+            "previous_output": text,
+        }
+        repair_payload = {
+            "model": tool_compiler.model,
+            "input": json.dumps(repair_input),
+        }
+        if tool_compiler.parameters:
+            repair_payload.update(tool_compiler.parameters)
+
+        response = await client.post_json("/responses", repair_payload)
+        repaired_text = _extract_output_text(response.data).strip()
+        parsed = _parse_tool_compiler_output(repaired_text)
+        if parsed is not None:
+            return parsed
+
+        raise ValueError(
+            "Tool compiler returned unparseable tool_calls payload; "
+            f"original={text[:400]!r} repaired={repaired_text[:400]!r}"
+        )
 
     async def _execute_tools(
         self,
@@ -285,17 +317,46 @@ def _extract_output_text(response: dict[str, Any]) -> str:
 def _parse_tool_compiler_output(text: str) -> list[dict[str, Any]] | None:
     text = text.strip()
 
-    try:
-        compiled = json.loads(text)
-    except json.JSONDecodeError:
-        compiled = None
+    candidates: list[str] = [text]
 
-    if isinstance(compiled, dict):
-        tool_calls = compiled.get("tool_calls")
-        if isinstance(tool_calls, list):
-            return [call for call in tool_calls if isinstance(call, dict)]
+    if "```" in text:
+        parts = []
+        in_fence = False
+        for line in text.splitlines():
+            if line.strip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                parts.append(line)
+        fenced = "\n".join(parts).strip()
+        if fenced:
+            candidates.append(fenced)
 
-    parsed_calls = []
+    for candidate in candidates:
+        try:
+            compiled = json.loads(candidate)
+        except json.JSONDecodeError:
+            compiled = None
+
+        if isinstance(compiled, dict):
+            tool_calls = compiled.get("tool_calls")
+            if isinstance(tool_calls, list):
+                return [call for call in tool_calls if isinstance(call, dict)]
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        sliced = text[start : end + 1]
+        try:
+            compiled = json.loads(sliced)
+        except json.JSONDecodeError:
+            compiled = None
+        if isinstance(compiled, dict):
+            tool_calls = compiled.get("tool_calls")
+            if isinstance(tool_calls, list):
+                return [call for call in tool_calls if isinstance(call, dict)]
+
+    parsed_calls: list[dict[str, Any]] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -309,18 +370,14 @@ def _parse_tool_compiler_output(text: str) -> list[dict[str, Any]] | None:
             if not separator:
                 continue
             payload = "{" + payload
-            if payload.endswith("}"):
-                try:
-                    parameters = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-            else:
+            if not payload.endswith("}"):
+                continue
+            try:
+                parameters = json.loads(payload)
+            except json.JSONDecodeError:
                 continue
             if isinstance(parameters, dict) and name:
                 parsed_calls.append({"tool": name.strip(), "parameters": parameters})
-            continue
-
-        if line.startswith("{") and line.endswith("}"):
             continue
 
     if parsed_calls:
