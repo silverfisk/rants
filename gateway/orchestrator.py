@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import json
+import time
+from typing import Any, AsyncGenerator
+
+from gateway.config import AppConfig
+from gateway.models.types import (
+    CanonicalTranscript,
+    OutputMessage,
+    OutputTextContent,
+    ResponseEvent,
+    ResponseObject,
+    ResponseStatus,
+    ToolExecutionResult,
+)
+from gateway.rlm_engine import RLMEngine
+from gateway.state.sqlite_store import SQLiteStore
+from gateway.tools.executors import create_default_registry
+
+
+class Orchestrator:
+    def __init__(self, config: AppConfig, store: SQLiteStore) -> None:
+        self.config = config
+        self.store = store
+        self.engine = RLMEngine(config)
+        self.registry = create_default_registry(config)
+
+    async def run_response(
+        self,
+        model: str,
+        input_text: str,
+        tools: list[dict[str, Any]],
+        tool_choice: str | dict[str, Any],
+        previous_response_id: str | None,
+        stream: bool,
+    ) -> tuple[ResponseObject, CanonicalTranscript]:
+        tool_schemas = tools or [schema.model_dump() for schema in self.registry.schemas()]
+        transcript = await self._build_transcript(input_text, tool_schemas, previous_response_id)
+
+        start = time.time()
+        status = ResponseStatus.IN_PROGRESS
+        output_message = OutputMessage(
+            id=f"msg_{int(start)}",
+            status="in_progress",
+            content=[OutputTextContent(text="")],
+        )
+
+        response = ResponseObject(
+            id=await self.store.new_response_id(),
+            created_at=start,
+            status=status,
+            model=model,
+            output=[output_message],
+            temperature=self.config.models.generator.temperature,
+            tool_choice=tool_choice,
+            tools=tool_schemas,
+            previous_response_id=previous_response_id,
+        )
+
+        max_iterations = self.config.limits.max_tool_iterations
+        iterations = 0
+        while iterations < max_iterations:
+            output = await self.engine.generate(transcript)
+            output_message.content[0].text += output.text
+            tool_calls = []
+            tool_results = []
+
+            if output.tool_intent:
+                tool_calls = await self._compile_tools(transcript, tool_schemas, output.tool_intent)
+                tool_results = await self._execute_tools(transcript, tool_calls)
+
+            await self.engine.append_step(transcript, output, tool_calls, tool_results)
+
+            if not output.tool_intent:
+                break
+            iterations += 1
+
+        response.status = ResponseStatus.COMPLETED
+        response.completed_at = time.time()
+        response.output[0].status = "completed"
+        await self.store.store_response(response.id, transcript, previous_response_id)
+        return response, transcript
+
+    async def stream_response(
+        self,
+        response: ResponseObject,
+        transcript: CanonicalTranscript,
+    ) -> AsyncGenerator[ResponseEvent, None]:
+        sequence = 0
+        yield ResponseEvent(type="response.created", sequence_number=sequence, response=response)
+        sequence += 1
+
+        output_item = response.output[0]
+        content = output_item.content[0]
+        start_index = 0
+        for chunk in _chunk_text(content.text):
+            yield ResponseEvent(
+                type="response.output_text.delta",
+                sequence_number=sequence,
+                output_index=0,
+                item_id=output_item.id,
+                content_index=0,
+                delta=chunk,
+                logprobs=[],
+            )
+            sequence += 1
+            start_index += len(chunk)
+
+        yield ResponseEvent(
+            type="response.output_text.done",
+            sequence_number=sequence,
+            output_index=0,
+            item_id=output_item.id,
+            content_index=0,
+            text=content.text,
+            logprobs=[],
+        )
+        sequence += 1
+
+        yield ResponseEvent(type="response.completed", sequence_number=sequence, response=response)
+
+    async def _compile_tools(
+        self,
+        transcript: CanonicalTranscript,
+        tool_schemas: list[dict[str, Any]],
+        tool_intent: str,
+    ) -> list[dict[str, Any]]:
+        from gateway.models.openai_client import OpenAIClient
+
+        payload = {
+            "model": self.config.models.tool_compiler.model,
+            "temperature": self.config.models.tool_compiler.temperature,
+            "input": json.dumps(
+                {
+                    "tool_schemas": tool_schemas,
+                    "transcript": transcript.model_dump(),
+                    "tool_intent": tool_intent,
+                }
+            ),
+        }
+        client = OpenAIClient(
+            self.config.models.tool_compiler.base_url,
+            api_key=self.config.models.tool_compiler.api_key,
+        )
+        response = await client.post_json("/responses", payload)
+        text = _extract_output_text(response.data)
+        try:
+            compiled = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Tool compiler returned invalid JSON: {exc}") from exc
+        return compiled.get("tool_calls", [])
+
+    async def _execute_tools(
+        self,
+        transcript: CanonicalTranscript,
+        tool_calls: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for call in tool_calls:
+            tool_name = call.get("tool")
+            parameters = call.get("parameters", {})
+            if not isinstance(tool_name, str):
+                results.append(
+                    ToolExecutionResult(
+                        tool="unknown",
+                        ok=False,
+                        output={"error": "unknown tool"},
+                    ).model_dump()
+                )
+                continue
+            definition = self.registry.get(tool_name)
+            if not definition:
+                results.append(
+                    ToolExecutionResult(
+                        tool=tool_name,
+                        ok=False,
+                        output={"error": "unknown tool"},
+                    ).model_dump()
+                )
+                continue
+            if tool_name == "task":
+                results.append(await self._execute_task(transcript, parameters))
+                continue
+            try:
+                output = definition.executor(parameters)
+                results.append(ToolExecutionResult(tool=tool_name, ok=True, output=output).model_dump())
+            except Exception as exc:  # noqa: BLE001
+                results.append(
+                    ToolExecutionResult(
+                        tool=tool_name,
+                        ok=False,
+                        output={"error": str(exc)},
+                    ).model_dump()
+                )
+        return results
+
+    async def _execute_task(
+        self,
+        transcript: CanonicalTranscript,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        if transcript and transcript.steps:
+            if transcript.steps[-1].tool_intent:
+                summary_input = transcript.steps[-1].tool_intent
+            else:
+                summary_input = transcript.steps[-1].generator_output
+        else:
+            summary_input = ""
+
+        input_text = parameters.get("prompt") or parameters.get("description") or summary_input
+        max_depth = int(self.config.limits.max_depth)
+        depth = int(parameters.get("depth", 1))
+        if depth >= max_depth:
+            return ToolExecutionResult(
+                tool="task",
+                ok=False,
+                output={"error": "max depth exceeded"},
+            ).model_dump()
+
+        child_transcript = await self.engine.initialize_transcript(None, input_text, [])
+        output = await self.engine.generate(child_transcript)
+        await self.engine.append_step(child_transcript, output, [], [])
+        return ToolExecutionResult(
+            tool="task",
+            ok=True,
+            output={"summary": output.text},
+        ).model_dump()
+
+    async def _build_transcript(
+        self,
+        input_text: str,
+        tool_schemas: list[dict[str, Any]],
+        previous_response_id: str | None,
+    ) -> CanonicalTranscript:
+        previous_transcript = await self.store.load_previous_transcript(previous_response_id)
+        transcript = await self.engine.initialize_transcript(None, input_text, tool_schemas)
+        if previous_transcript:
+            transcript.steps = previous_transcript.steps
+        return transcript
+
+
+
+def _extract_output_text(response: dict[str, Any]) -> str:
+    output = response.get("output", [])
+    for item in output:
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                if content.get("type") == "output_text":
+                    return content.get("text", "")
+    return ""
+
+
+def _chunk_text(text: str, chunk_size: int = 64) -> list[str]:
+    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]

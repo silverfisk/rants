@@ -1,0 +1,31 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+
+limits:
+  max_tool_iterations: 6
+  max_wallclock_seconds: 120
+  max_depth: 2
+  workspace_root: /work
+  tool_output_max_bytes: 16384
+  webfetch_max_bytes: 5242880
+
+rlm:
+  environment: docker
+  max_iterations: 10
+  max_depth: 2
+
+models:
+  generator:
+    base_url: http://nemotron:8000/v1
+    temperature: 0.2
+    model: rlm-generator
+    api_key: null
+  tool_compiler:
+    base_url: http://ollama:11434/v1
+    temperature: 0.0
+    model: tool-compiler
+    api_key: null
+
+state:
+  sqlite_path: /work/rants.sqlite

@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  gateway:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./work:/work
+    environment:
+      - RANTS_STATE__SQLITE_PATH=/work/rants.sqlite
+    depends_on:
+      - generator
+      - tool_compiler
+
+  generator:
+    image: vllm/vllm-openai:latest
+    command: ["--host", "0.0.0.0", "--port", "8000", "--model", "meta-llama/Llama-3.1-8B-Instruct"]
+    ports:
+      - "8001:8000"
+
+  tool_compiler:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"

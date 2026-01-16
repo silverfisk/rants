@@ -1,0 +1,19 @@
+[project]
+name = "rants"
+version = "0.1.0"
+description = "RANTS: Recursive Language Model gateway"
+requires-python = ">=3.13"
+readme = "README.md"
+license = { text = "Proprietary" }
+authors = [{ name = "RANTS Contributors" }]
+
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.4.0",
+  "pyyaml>=6.0.2",
+  "aiosqlite>=0.20.0",
+]
+
