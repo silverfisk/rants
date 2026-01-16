@@ -15,5 +15,6 @@ dependencies = [
   "pydantic-settings>=2.4.0",
   "pyyaml>=6.0.2",
   "aiosqlite>=0.20.0",
+  "behave>=1.2.6",
 ]
 

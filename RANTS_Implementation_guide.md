@@ -340,16 +340,31 @@ Return:
 * Each response has a UUID
 * SQLite used for transcript storage
 * Lookup supported via `previous_response_id`
+* Responses are scoped by tenant ID
+* Tool execution audit entries are stored for tracing
 
 ---
 
 ## Security and sandboxing
 
+* API requests can require API keys
+* API keys map to tenant IDs for isolation
 * All tools execute inside gateway container
 * Workspace root enforced (e.g. /work)
 * No filesystem access outside workspace
 * Webfetch size capped (e.g. 5 MB)
 * Tool output truncated uniformly
+* Rate limiting is enforced per tenant
+* Tool execution is logged to an audit table
+
+---
+
+## Resilience and rate limits
+
+* Generator/tool compiler requests use timeouts
+* Retry with exponential backoff on transient failures
+* Gateway rejects requests that exceed rate limits
+* Backends are treated as swappable providers
 
 ---
 
@@ -367,18 +382,54 @@ limits:
   max_wallclock_seconds: 120
 
 rlm:
-  environment: docker
-  max_iterations: 10
-  max_depth: 2
+  rants_one:
+    name: rants_one_name
+    environment: docker
+    max_iterations: 10
+    max_depth: 2
 
 models:
   generator:
-    base_url: http://nemotron:8000/v1
-    temperature: 0.2
+    provider: ollama
+    base_url: http://generator:11434/v1
+    model: devstral-small-tu:latest
+    capabilities:
+      - reasoning
+      - text
+    parameters:
+      temperature: 0.7
+      max_tokens: 94000
 
   tool_compiler:
-    base_url: http://ollama:11434/v1
-    temperature: 0.0
+    provider: ollama
+    base_url: http://tool_compiler:11434/v1
+    model: functiongemma:latest
+    capabilities:
+      - tool_compilation
+    parameters:
+      temperature: 0.0
+
+  vision:
+    provider: ollama
+    base_url: http://generator:11434/v1
+    model: qwen3-vl:8b
+    capabilities:
+      - vision
+    parameters: {}
+
+auth:
+  enabled: false
+  api_keys: []
+
+rate_limits:
+  enabled: false
+  requests_per_minute: 120
+  burst: 60
+
+resilience:
+  request_timeout_seconds: 120.0
+  max_retries: 2
+  backoff_seconds: 0.5
 ```
 
 ---
@@ -392,9 +443,11 @@ models:
   chat_shim.py
   orchestrator.py
   rlm_engine.py
+  security.py
   tools/
     registry.py
     executors.py
+    audit.py
   models/
     openai_client.py
   state/

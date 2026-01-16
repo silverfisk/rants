@@ -1,0 +1,5 @@
+work/
+uv.lock
+.venv
+*.pyc
+__pycache__/

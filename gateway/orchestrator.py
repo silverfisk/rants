@@ -17,14 +17,17 @@ from gateway.models.types import (
 from gateway.rlm_engine import RLMEngine
 from gateway.state.sqlite_store import SQLiteStore
 from gateway.tools.executors import create_default_registry
+from gateway.tools.audit import AuditLogger
 
 
 class Orchestrator:
-    def __init__(self, config: AppConfig, store: SQLiteStore) -> None:
+    def __init__(self, config: AppConfig, store: SQLiteStore, tenant_id: str) -> None:
         self.config = config
         self.store = store
+        self.tenant_id = tenant_id
         self.engine = RLMEngine(config)
         self.registry = create_default_registry(config)
+        self.audit = AuditLogger(store)
 
     async def run_response(
         self,
@@ -52,10 +55,11 @@ class Orchestrator:
             status=status,
             model=model,
             output=[output_message],
-            temperature=self.config.models.generator.temperature,
+            temperature=self.config.models.generator.parameters.get("temperature"),
             tool_choice=tool_choice,
             tools=tool_schemas,
             previous_response_id=previous_response_id,
+            user=self.tenant_id,
         )
 
         max_iterations = self.config.limits.max_tool_iterations
@@ -71,6 +75,12 @@ class Orchestrator:
                 tool_results = await self._execute_tools(transcript, tool_calls)
 
             await self.engine.append_step(transcript, output, tool_calls, tool_results)
+            await self.audit.log_tool_activity(
+                tenant_id=self.tenant_id,
+                response_id=response.id,
+                tool_calls=tool_calls,
+                tool_results=tool_results,
+            )
 
             if not output.tool_intent:
                 break
@@ -79,7 +89,12 @@ class Orchestrator:
         response.status = ResponseStatus.COMPLETED
         response.completed_at = time.time()
         response.output[0].status = "completed"
-        await self.store.store_response(response.id, transcript, previous_response_id)
+        await self.store.store_response(
+            response.id,
+            transcript,
+            previous_response_id,
+            tenant_id=self.tenant_id,
+        )
         return response, transcript
 
     async def stream_response(
@@ -128,9 +143,9 @@ class Orchestrator:
     ) -> list[dict[str, Any]]:
         from gateway.models.openai_client import OpenAIClient
 
+        tool_compiler = self.config.models.tool_compiler
         payload = {
-            "model": self.config.models.tool_compiler.model,
-            "temperature": self.config.models.tool_compiler.temperature,
+            "model": tool_compiler.model,
             "input": json.dumps(
                 {
                     "tool_schemas": tool_schemas,
@@ -139,9 +154,17 @@ class Orchestrator:
                 }
             ),
         }
+        if tool_compiler.parameters:
+            payload.update(tool_compiler.parameters)
+
+        if "tool_compilation" not in tool_compiler.capabilities:
+            raise ValueError("Tool compiler missing tool_compilation capability")
         client = OpenAIClient(
-            self.config.models.tool_compiler.base_url,
-            api_key=self.config.models.tool_compiler.api_key,
+            tool_compiler.base_url,
+            api_key=tool_compiler.api_key,
+            timeout=self.config.resilience.request_timeout_seconds,
+            max_retries=self.config.resilience.max_retries,
+            backoff_seconds=self.config.resilience.backoff_seconds,
         )
         response = await client.post_json("/responses", payload)
         text = _extract_output_text(response.data)
@@ -233,7 +256,7 @@ class Orchestrator:
         tool_schemas: list[dict[str, Any]],
         previous_response_id: str | None,
     ) -> CanonicalTranscript:
-        previous_transcript = await self.store.load_previous_transcript(previous_response_id)
+        previous_transcript = await self.store.load_previous_transcript(previous_response_id, self.tenant_id)
         transcript = await self.engine.initialize_transcript(None, input_text, tool_schemas)
         if previous_transcript:
             transcript.steps = previous_transcript.steps

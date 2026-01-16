@@ -134,7 +134,7 @@ class ResponseEvent(BaseModel):
 
 
 class ResponseRequest(BaseModel):
-    model: str
+    model: str | None = None
     input: str | list[dict[str, Any]]
     tools: list[dict[str, Any]] = Field(default_factory=list)
     tool_choice: str | dict[str, Any] = "auto"
@@ -142,6 +142,7 @@ class ResponseRequest(BaseModel):
     max_output_tokens: Optional[int] = None
     temperature: Optional[float] = None
     previous_response_id: Optional[str] = None
+    user: Optional[str] = None
 
 
 class ChatCompletionRequest(BaseModel):

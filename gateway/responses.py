@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncGenerator
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from gateway.config import AppConfig
-from gateway.models.types import ResponseEvent, ResponseRequest
+from gateway.errors import build_upstream_error_response
+from gateway.models.types import ResponseRequest
 from gateway.orchestrator import Orchestrator
+from gateway.security import enforce_rate_limit, require_auth
 from gateway.state.sqlite_store import SQLiteStore
 
 
@@ -30,15 +33,27 @@ async def create_response(
     config: AppConfig = Depends(_get_config),
     store: SQLiteStore = Depends(_get_store),
 ):
-    orchestrator = Orchestrator(config, store)
-    response_obj, transcript = await orchestrator.run_response(
-        model=payload.model,
-        input_text=_extract_input_text(payload.input),
-        tools=payload.tools,
-        tool_choice=payload.tool_choice,
-        previous_response_id=payload.previous_response_id,
-        stream=payload.stream,
-    )
+    auth = require_auth(request)
+    enforce_rate_limit(request)
+    if config.auth.enabled:
+        tenant_id = auth.tenant_id
+    else:
+        tenant_id = payload.user or auth.tenant_id
+    orchestrator = Orchestrator(config, store, tenant_id=tenant_id)
+    rlm_name = config.rlm.rants_one.name
+    if payload.model and payload.model != rlm_name:
+        raise HTTPException(status_code=400, detail="unknown model")
+    try:
+        response_obj, transcript = await orchestrator.run_response(
+            model=rlm_name,
+            input_text=_extract_input_text(payload.input),
+            tools=payload.tools,
+            tool_choice=payload.tool_choice,
+            previous_response_id=payload.previous_response_id,
+            stream=payload.stream,
+        )
+    except httpx.HTTPError as exc:
+        return build_upstream_error_response(exc)
     if payload.stream:
         async def event_stream() -> AsyncGenerator[str, None]:
             async for event in orchestrator.stream_response(response_obj, transcript):

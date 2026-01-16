@@ -41,12 +41,7 @@
   - Single-file format: `uv run black path/to/file.py`
 
 ### Test
-- Not defined.
-- If tests are added (likely `pytest`), document:
-  - `uv run pytest`
-  - Single test file: `uv run pytest path/to/test_file.py`
-  - Single test case: `uv run pytest path/to/test_file.py -k test_name`
-  - Single test by node id: `uv run pytest path/to/test_file.py::TestClass::test_name`
+- `RANTS_STATE__SQLITE_PATH=./work/rants.sqlite uv run behave`
 
 ## Code Style Guidelines
 > These are repository defaults until codebase-specific

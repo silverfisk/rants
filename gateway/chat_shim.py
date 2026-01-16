@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, Depends, Request
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from gateway.config import AppConfig
+from gateway.errors import build_upstream_error_response
 from gateway.models.types import ChatCompletionRequest
 from gateway.orchestrator import Orchestrator
+from gateway.security import enforce_rate_limit, require_auth
 from gateway.state.sqlite_store import SQLiteStore
 
 
@@ -30,16 +33,24 @@ async def chat_completions(
     config: AppConfig = Depends(_get_config),
     store: SQLiteStore = Depends(_get_store),
 ):
-    orchestrator = Orchestrator(config, store)
+    auth = require_auth(request)
+    enforce_rate_limit(request)
+    rlm_name = config.rlm.rants_one.name
+    if payload.model and payload.model != rlm_name:
+        raise HTTPException(status_code=400, detail="unknown model")
+    orchestrator = Orchestrator(config, store, tenant_id=auth.tenant_id)
     input_text = _messages_to_input(payload.messages)
-    response_obj, transcript = await orchestrator.run_response(
-        model=payload.model,
-        input_text=input_text,
-        tools=[],
-        tool_choice="auto",
-        previous_response_id=None,
-        stream=payload.stream,
-    )
+    try:
+        response_obj, transcript = await orchestrator.run_response(
+            model=rlm_name,
+            input_text=input_text,
+            tools=[],
+            tool_choice="auto",
+            previous_response_id=None,
+            stream=payload.stream,
+        )
+    except httpx.HTTPError as exc:
+        return build_upstream_error_response(exc)
 
     if payload.stream:
         async def event_stream() -> AsyncGenerator[str, None]:

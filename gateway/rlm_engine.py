@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from gateway.config import AppConfig
+from gateway.config import AppConfig, ModelEndpointConfig
 from gateway.models.openai_client import OpenAIClient
 from gateway.models.types import CanonicalStep, CanonicalTranscript, RLMOutput
 
@@ -48,14 +48,33 @@ class RLMEngine:
             tool_intent = parts[-1].strip()
         return RLMOutput(text=output, tool_intent=tool_intent or None)
 
+    def _select_generator(self, transcript: CanonicalTranscript) -> ModelEndpointConfig:
+        if self._has_vision_inputs(transcript) and self.config.models.vision:
+            return self.config.models.vision
+        if self.config.models.code_interpreter and "code" in self.config.models.code_interpreter.capabilities:
+            return self.config.models.code_interpreter
+        return self.config.models.generator
+
+    def _has_vision_inputs(self, transcript: CanonicalTranscript) -> bool:
+        user_text = transcript.user.lower()
+        if "image" in user_text or "img" in user_text:
+            return True
+        for step in transcript.steps:
+            if "image" in step.generator_output.lower():
+                return True
+        return False
+
     async def generate(self, transcript: CanonicalTranscript) -> RLMOutput:
+        selected = self._select_generator(transcript)
         client = OpenAIClient(
-            self.config.models.generator.base_url,
-            api_key=self.config.models.generator.api_key,
+            selected.base_url,
+            api_key=selected.api_key,
+            timeout=self.config.resilience.request_timeout_seconds,
+            max_retries=self.config.resilience.max_retries,
+            backoff_seconds=self.config.resilience.backoff_seconds,
         )
         payload = {
-            "model": self.config.models.generator.model,
-            "temperature": self.config.models.generator.temperature,
+            "model": selected.model,
             "input": json_dumps(
                 {
                     "system": self._build_system_prompt(),
@@ -63,6 +82,8 @@ class RLMEngine:
                 }
             ),
         }
+        if selected.parameters:
+            payload.update(selected.parameters)
         response = await client.post_json("/responses", payload)
         text = _extract_output_text(response.data)
         return self.parse_output(text)
