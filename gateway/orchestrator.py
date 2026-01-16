@@ -171,12 +171,16 @@ class Orchestrator:
             backoff_seconds=self.config.resilience.backoff_seconds,
         )
         response = await client.post_json("/responses", payload)
-        text = _extract_output_text(response.data)
-        try:
-            compiled = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Tool compiler returned invalid JSON: {exc}") from exc
-        return compiled.get("tool_calls", [])
+        text = _extract_output_text(response.data).strip()
+
+        if not text:
+            raise ValueError("Tool compiler returned empty tool_calls payload")
+
+        parsed = _parse_tool_compiler_output(text)
+        if parsed is not None:
+            return parsed
+
+        raise ValueError("Tool compiler returned unparseable tool_calls payload")
 
     async def _execute_tools(
         self,
@@ -276,6 +280,53 @@ def _extract_output_text(response: dict[str, Any]) -> str:
                 if content.get("type") == "output_text":
                     return content.get("text", "")
     return ""
+
+
+def _parse_tool_compiler_output(text: str) -> list[dict[str, Any]] | None:
+    text = text.strip()
+
+    try:
+        compiled = json.loads(text)
+    except json.JSONDecodeError:
+        compiled = None
+
+    if isinstance(compiled, dict):
+        tool_calls = compiled.get("tool_calls")
+        if isinstance(tool_calls, list):
+            return [call for call in tool_calls if isinstance(call, dict)]
+
+    parsed_calls = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        if line.startswith("<start_function_call>") and line.endswith("<end_function_call>"):
+            inner = line.removeprefix("<start_function_call>").removesuffix("<end_function_call>")
+            if inner.startswith("call:"):
+                inner = inner.removeprefix("call:")
+            name, separator, payload = inner.partition("{")
+            if not separator:
+                continue
+            payload = "{" + payload
+            if payload.endswith("}"):
+                try:
+                    parameters = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+            else:
+                continue
+            if isinstance(parameters, dict) and name:
+                parsed_calls.append({"tool": name.strip(), "parameters": parameters})
+            continue
+
+        if line.startswith("{") and line.endswith("}"):
+            continue
+
+    if parsed_calls:
+        return parsed_calls
+
+    return None
 
 
 def _chunk_text(text: str, chunk_size: int = 64) -> list[str]:

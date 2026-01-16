@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 import httpx
 
 
-def build_upstream_error_response(exc: httpx.HTTPError) -> JSONResponse:
+def build_upstream_error_response(exc: Exception) -> JSONResponse:
     message = _format_upstream_error(exc)
     payload = {
         "error": {
@@ -18,7 +18,7 @@ def build_upstream_error_response(exc: httpx.HTTPError) -> JSONResponse:
     return JSONResponse(status_code=502, content=payload)
 
 
-def _format_upstream_error(exc: httpx.HTTPError) -> str:
+def _format_upstream_error(exc: Exception) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
         detail = _extract_error_message(response)

@@ -52,7 +52,7 @@ async def create_response(
             previous_response_id=payload.previous_response_id,
             stream=payload.stream,
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         return build_upstream_error_response(exc)
     if payload.stream:
         async def event_stream() -> AsyncGenerator[str, None]:

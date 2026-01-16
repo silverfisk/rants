@@ -50,7 +50,7 @@ async def chat_completions(
             stream=payload.stream,
             execute_tools=False,
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         return build_upstream_error_response(exc)
 
     if payload.stream:
