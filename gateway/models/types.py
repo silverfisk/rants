@@ -100,6 +100,7 @@ class ResponseObject(BaseModel):
     object: Literal["response"] = "response"
     created_at: float
     status: ResponseStatus
+    completed_at: Optional[float] = None
     error: Optional[ResponseError] = None
     incomplete_details: Optional[dict[str, Any]] = None
     instructions: Optional[str] = None
@@ -148,6 +149,8 @@ class ResponseRequest(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    tool_choice: str | dict[str, Any] = "auto"
     stream: bool = False
     max_tokens: Optional[int] = None
     temperature: Optional[float] = None

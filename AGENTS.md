@@ -42,6 +42,7 @@
 
 ### Test
 - `RANTS_STATE__SQLITE_PATH=./work/rants.sqlite uv run behave`
+- `uv run behave -t @contract`
 
 ## Code Style Guidelines
 > These are repository defaults until codebase-specific

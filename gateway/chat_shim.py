@@ -44,10 +44,11 @@ async def chat_completions(
         response_obj, transcript = await orchestrator.run_response(
             model=rlm_name,
             input_text=input_text,
-            tools=[],
-            tool_choice="auto",
+            tools=payload.tools,
+            tool_choice=payload.tool_choice,
             previous_response_id=None,
             stream=payload.stream,
+            execute_tools=False,
         )
     except httpx.HTTPError as exc:
         return build_upstream_error_response(exc)
@@ -87,6 +88,32 @@ async def chat_completions(
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+    compiled_tool_calls = transcript.steps[-1].tool_calls if transcript.steps else []
+    tool_calls = []
+    if compiled_tool_calls:
+        for index, call in enumerate(compiled_tool_calls):
+            tool_name = call.get("tool")
+            parameters = call.get("parameters")
+            if not isinstance(tool_name, str) or not isinstance(parameters, dict):
+                continue
+            tool_calls.append(
+                {
+                    "id": f"call_{response_obj.id}_{index}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(parameters),
+                    },
+                }
+            )
+
+    if tool_calls:
+        finish_reason = "tool_calls"
+        message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+    else:
+        finish_reason = "stop"
+        message = {"role": "assistant", "content": response_obj.output[0].content[0].text}
+
     data = {
         "id": response_obj.id,
         "object": "chat.completion",
@@ -95,8 +122,8 @@ async def chat_completions(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": response_obj.output[0].content[0].text},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": finish_reason,
             }
         ],
     }

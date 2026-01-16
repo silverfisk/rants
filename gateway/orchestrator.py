@@ -37,6 +37,7 @@ class Orchestrator:
         tool_choice: str | dict[str, Any],
         previous_response_id: str | None,
         stream: bool,
+        execute_tools: bool = True,
     ) -> tuple[ResponseObject, CanonicalTranscript]:
         tool_schemas = tools or [schema.model_dump() for schema in self.registry.schemas()]
         transcript = await self._build_transcript(input_text, tool_schemas, previous_response_id)
@@ -72,7 +73,8 @@ class Orchestrator:
 
             if output.tool_intent:
                 tool_calls = await self._compile_tools(transcript, tool_schemas, output.tool_intent)
-                tool_results = await self._execute_tools(transcript, tool_calls)
+                if execute_tools:
+                    tool_results = await self._execute_tools(transcript, tool_calls)
 
             await self.engine.append_step(transcript, output, tool_calls, tool_results)
             await self.audit.log_tool_activity(
@@ -83,6 +85,8 @@ class Orchestrator:
             )
 
             if not output.tool_intent:
+                break
+            if not execute_tools:
                 break
             iterations += 1
 
