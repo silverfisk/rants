@@ -11,21 +11,27 @@ limits:
   webfetch_max_bytes: 5242880
 
 rlm:
-  environment: docker
-  max_iterations: 10
-  max_depth: 2
+  rants_one:
+    name: rants_one_name
+    environment: docker
+    max_iterations: 10
+    max_depth: 2
 
 models:
   generator:
-    base_url: http://nemotron:8000/v1
-    temperature: 0.2
-    model: rlm-generator
+    base_url: http://generator:8001
+    model: mistralai/Devstral-Small-2-24B-Instruct-2512
     api_key: null
+    capabilities: ["text"]
+    parameters:
+      temperature: 0.2
   tool_compiler:
-    base_url: http://ollama:11434/v1
-    temperature: 0.0
-    model: tool-compiler
+    base_url: http://tool_compiler:8002
+    model: google/functiongemma-270m-it
     api_key: null
+    capabilities: ["tool_compilation"]
+    parameters:
+      temperature: 0.0
 
 state:
   sqlite_path: /work/rants.sqlite

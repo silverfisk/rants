@@ -91,31 +91,64 @@ def given_upstream_error(context) -> None:
 @given("the upstream responses endpoint succeeds")
 def given_upstream_success(context) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "id": "resp_123",
-                "object": "response",
-                "created_at": 123.0,
-                "status": "completed",
-                "output": [
-                    {
-                        "type": "message",
-                        "id": "msg_1",
+        if request.url.path.endswith("/responses"):
+            body = json.loads(request.content.decode("utf-8") or "{}")
+            raw_input = body.get("input", "")
+            input_text = raw_input if isinstance(raw_input, str) else ""
+            if "tool_intent" in input_text:
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": "resp_tool_compiler",
+                        "object": "response",
+                        "created_at": 123.0,
                         "status": "completed",
-                        "role": "assistant",
-                        "content": [
+                        "output": [
                             {
-                                "type": "output_text",
-                                "text": "Hello!",
-                                "annotations": [],
+                                "type": "message",
+                                "id": "msg_tool_compiler",
+                                "status": "completed",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": '{"tool_calls": []}',
+                                        "annotations": [],
+                                    }
+                                ],
                             }
                         ],
-                    }
-                ],
-            },
-            request=request,
-        )
+                    },
+                    request=request,
+                )
+
+            return httpx.Response(
+                200,
+                json={
+                    "id": "resp_123",
+                    "object": "response",
+                    "created_at": 123.0,
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "id": "msg_1",
+                            "status": "completed",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "Hello!",
+                                    "annotations": [],
+                                }
+                            ],
+                        }
+                    ],
+                },
+                request=request,
+            )
+
+        return httpx.Response(404, json={"error": {"message": "Not found"}}, request=request)
 
     context.upstream_handler = handler
 

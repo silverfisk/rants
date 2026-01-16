@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import time
 from typing import Any, AsyncGenerator
 
@@ -18,6 +20,9 @@ from gateway.rlm_engine import RLMEngine
 from gateway.state.sqlite_store import SQLiteStore
 from gateway.tools.executors import create_default_registry
 from gateway.tools.audit import AuditLogger
+
+
+logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
@@ -71,8 +76,17 @@ class Orchestrator:
             tool_calls = []
             tool_results = []
 
-            if output.tool_intent:
-                tool_calls = await self._compile_tools(transcript, tool_schemas, output.tool_intent)
+            tool_intent = output.tool_intent
+            if tool_choice == "none":
+                tool_intent = None
+            elif tool_intent is None:
+                tool_intent = (
+                    "Determine whether any tools are required to satisfy the user request. "
+                    "If tools are needed, select and parameterize them."
+                )
+
+            if tool_intent:
+                tool_calls = await self._compile_tools(transcript, tool_schemas, tool_intent)
                 if execute_tools:
                     tool_results = await self._execute_tools(transcript, tool_calls)
 
@@ -208,6 +222,13 @@ class Orchestrator:
         parsed = _parse_tool_compiler_output(repaired_text)
         if parsed is not None:
             return parsed
+
+        if os.environ.get("RANTS_DEBUG_TOOL_COMPILER"):
+            logger.warning(
+                "Tool compiler output unparseable. original=%r repaired=%r",
+                text[:4000],
+                repaired_text[:4000],
+            )
 
         raise ValueError(
             "Tool compiler returned unparseable tool_calls payload; "
